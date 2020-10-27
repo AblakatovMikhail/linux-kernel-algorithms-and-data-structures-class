@@ -210,7 +210,7 @@ static void dummy_exit(void)
 	int i;
 
 	for (i = 0; i < dummy_device_data[0].msg_queue_len; i++)
-		vfree (dummy_device_data[0].msg_queue[0].buffer);
+		vfree (dummy_device_data[0].msg_queue[i].buffer);
 
     for (i = 0; i < DUMMY_NUM_MINORS; i++)
 	{
