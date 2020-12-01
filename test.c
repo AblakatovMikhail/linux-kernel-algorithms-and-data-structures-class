@@ -5,6 +5,9 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/printk.h>
+#include <linux/slab.h>
+#include <asm/uaccess.h> /* copy_from_user, copy_to_user */
+#include <linux/kfifo.h>
 
 MODULE_DESCRIPTION("My kernel module");
 MODULE_AUTHOR("Me");
@@ -14,31 +17,61 @@ MODULE_LICENSE("GPL");
 #define DUMMY_NUM_MINORS 1
 #define DUMMY_MODULE_NAME "dummy"
 
+#define FIFO_SIZE 100
+
+int openCount = 0;
+int closeCount = 0;
+
 struct dummy_device_data {
 	struct cdev cdev;
 	dev_t dev;
 };
 
+static struct kfifo test;
 static struct dummy_device_data dummy_device_data[DUMMY_NUM_MINORS];
 
-static int dummy_open(struct inode *inode, struct file *file)
+ssize_t dummy_read (struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
-	printk("%s: opened.\n", DUMMY_MODULE_NAME);
+	int ret;
+	unsigned int copied;
 
+	ret = kfifo_to_user(&test, buf, 1, &copied);
+
+	return ret ? ret : copied;
+}
+
+ssize_t dummy_write (struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{
+	int ret;
+	unsigned int copied;
+
+	ret = kfifo_from_user(&test, buf, count, &copied);
+
+	return ret ? ret : copied;
+}
+
+
+int dummy_open (struct inode *pinode, struct file *pfile)
+{
+	openCount++;
+	printk(KERN_ALERT "[OPENING] It has been opened %d times\n", openCount);
 	return 0;
 }
 
-static int dummy_release (struct inode *inode, struct file *file)
-{
-	printk("%s: closed.\n", DUMMY_MODULE_NAME);
 
+int dummy_close (struct inode *pinode, struct file *pfile)
+{
+	closeCount++;
+	printk(KERN_ALERT "[CLOSING] It has been closed %d times\n", closeCount);
 	return 0;
 }
 
-static struct file_operations dummy_fops = {
-	.owner = THIS_MODULE,
-	.open = dummy_open,
-	.release = dummy_release
+struct file_operations dummy_fops = {
+	.owner   = THIS_MODULE,
+	.read    = dummy_read,
+	.write   = dummy_write,
+	.open    = dummy_open,
+	.release = dummy_close
 };
 
 static int dummy_chrdev_init(void)
@@ -108,13 +141,25 @@ static int dummy_init(void)
 			 __FUNCTION__, error);
 	}
 
+
+	/* Initializing fifo */
+	int ret;
+
+	ret = kfifo_alloc(&test, FIFO_SIZE, GFP_KERNEL);
+	if (ret) {
+		printk(KERN_ERR "error kfifo_alloc\n");
+		return ret;
+	}
+
         return 0;
 }
 
 static void dummy_exit(void)
 {
-        printk("%s: Bye\n", __FUNCTION__);
+	printk(KERN_ALERT "[EXITING]\n");
+	kfifo_free(&test);
 }
+
 
 module_init(dummy_init);
 module_exit(dummy_exit);
