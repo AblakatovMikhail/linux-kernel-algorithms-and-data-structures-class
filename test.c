@@ -17,7 +17,10 @@ MODULE_LICENSE("GPL");
 #define DUMMY_NUM_MINORS 1
 #define DUMMY_MODULE_NAME "dummy"
 
-#define FIFO_SIZE 100
+#define MAX_LENGTH_MSG 512 //511 + '\0'
+
+static DEFINE_MUTEX(read_lock);
+static DEFINE_MUTEX(write_lock);
 
 int openCount = 0;
 int closeCount = 0;
@@ -27,6 +30,90 @@ struct dummy_device_data {
 	dev_t dev;
 };
 
+struct fifo_cell 
+{
+    struct fifo_cell* next_cell;
+    char msg[MAX_LENGTH_MSG];
+};
+
+struct dummy_fifo 
+{
+    struct fifo_cell* start;
+    struct fifo_cell* end;
+} fifo;
+
+/**
+ * Если очередь пуста, то вернет 1, иначе 0
+ */
+int isFifoEmpty (struct dummy_fifo* fifo){
+    if ( (fifo->start == NULL) && (fifo->end == NULL))
+    {
+	return 1;
+    }else
+	return 0;
+}
+
+void AddMsgToFifo( char msg[MAX_LENGTH_MSG - 1], struct dummy_fifo* fifo){
+    struct fifo_cell *new_cell = kmalloc( sizeof( struct fifo_cell), GFP_KERNEL);
+    new_cell -> next_cell = NULL;
+    strcpy( new_cell->msg, msg);
+
+    if( isFifoEmpty( fifo) )
+    {
+	fifo->start = new_cell;
+	fifo->end = new_cell;
+    }else
+    {
+	new_cell->next_cell = fifo->end;
+	fifo->end = new_cell;
+    }
+
+}
+
+/**
+ * Вытаскивает сообщение из очереди и печатает его. Если очередь пуста, то вернет 1
+ * UPD: Странное поведние, если возвращает не 0. Так что пусть всегда вернет 0
+ */
+int GetMsgFromFifo( struct dummy_fifo* fifo)
+{
+    if ( isFifoEmpty( fifo))
+    {
+	printk(KERN_INFO "[ALERT] Fifo is empty. Nothing to read\n");
+	return 0;
+    }
+    /* Случай, когда 1 элемент в очереди */
+    if (fifo->start == fifo->end)
+    {
+	    printk(KERN_INFO "[MESSAGE] %s\n", fifo->start->msg);
+	    kfree(fifo->start);
+	    fifo->start = NULL;
+	    fifo->end = NULL;
+	    return 0;
+    }else
+    /* Случай, когда в очереди >1 элемента */
+    {
+	struct fifo_cell *cell = fifo->start;
+	struct fifo_cell *prev_cell = fifo->end;
+
+	while(prev_cell->next_cell != cell)
+	{
+	    prev_cell = prev_cell->next_cell;
+	}
+
+	printk(KERN_INFO "[MESSAGE] %s\n", cell->msg);
+	kfree(cell);
+	fifo->start = prev_cell;
+	prev_cell->next_cell = NULL;
+	return 0;
+    }
+}
+
+
+/* Буфер и размер данных для записи в него */
+static char driver_buffer[MAX_LENGTH_MSG];
+static unsigned long driver_buffer_size = 0;
+
+
 static struct kfifo test;
 static struct dummy_device_data dummy_device_data[DUMMY_NUM_MINORS];
 
@@ -35,19 +122,40 @@ ssize_t dummy_read (struct file *file, char __user *buf, size_t count, loff_t *p
 	int ret;
 	unsigned int copied;
 
-	ret = kfifo_to_user(&test, buf, 1, &copied);
+	if (mutex_lock_interruptible(&read_lock))
+		return -ERESTARTSYS; //Необходимо для перезапуска процесса записи, если mutex кем-то захвачен
+	
+	ret = GetMsgFromFifo( &fifo);
 
-	return ret ? ret : copied;
+	mutex_unlock(&read_lock);
+
+	return ret;
 }
-
-ssize_t dummy_write (struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+ 
+ssize_t dummy_write (struct file *file, const char __user *buffer, size_t len, loff_t *off)
 {
-	int ret;
-	unsigned int copied;
+	if (mutex_lock_interruptible(&write_lock))
+		return -ERESTARTSYS; //Необходимо для перезапуска процесса записи, если mutex кем-то захвачен
 
-	ret = kfifo_from_user(&test, buf, count, &copied);
 
-	return ret ? ret : copied;
+	if ( len > MAX_LENGTH_MSG - 1 )	{
+		driver_buffer_size = MAX_LENGTH_MSG - 1;
+	}
+	else	{
+		driver_buffer_size = len;
+	}
+	
+	if ( copy_from_user(driver_buffer, buffer, driver_buffer_size) ) {
+		return -EFAULT;
+	}
+
+	AddMsgToFifo( driver_buffer, &fifo);
+
+	printk(KERN_INFO "[INFO] writed %lu bytes\n", driver_buffer_size);
+
+	mutex_unlock(&write_lock);
+	
+	return driver_buffer_size;
 }
 
 
@@ -143,21 +251,16 @@ static int dummy_init(void)
 
 
 	/* Initializing fifo */
-	int ret;
+	fifo.start = NULL;
+	fifo.end = NULL;
 
-	ret = kfifo_alloc(&test, FIFO_SIZE, GFP_KERNEL);
-	if (ret) {
-		printk(KERN_ERR "error kfifo_alloc\n");
-		return ret;
-	}
-
-        return 0;
+	return 0;
 }
 
 static void dummy_exit(void)
 {
 	printk(KERN_ALERT "[EXITING]\n");
-	kfifo_free(&test);
+	kfree(&fifo);
 }
 
 
